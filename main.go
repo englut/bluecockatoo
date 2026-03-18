@@ -36,6 +36,7 @@ type Config struct {
 	DiscordToken string            `yaml:"discordToken"`
 	Server       string            `yaml:"server"`
 	Nick         string            `yaml:"nickname"`
+	Password     string            `yaml:"password"`
 	Channels     map[string]string `yaml:"channels"` // Discord ID to IRC name
 }
 
@@ -131,6 +132,7 @@ func ircLoop() error {
 			fmt.Printf("<<< %s\n", line)
 		}
 	}
+
 	return c.Run()
 }
 
@@ -144,6 +146,18 @@ func ircWrite(m *irc.Message) {
 		return
 	}
 	ircClient.WriteMessage(m)
+}
+
+func ircRegister() {
+	if cfg.Password != "" {
+		ircClient.WriteMessage(&irc.Message{
+			Command: "PRIVMSG",
+			Params: []string{
+				"nickserv",
+				"identify " + cfg.Nick + " " + cfg.Password,
+			},
+		})
+	}
 }
 
 func discordChannel(irc string) string {
@@ -422,6 +436,7 @@ func ircHandler(c *irc.Client, m *irc.Message) {
 		})
 	case "PONG":
 		if m.Params[len(m.Params)-1] == "ready" {
+			ircRegister()
 			ircReady = true
 		}
 	default:
