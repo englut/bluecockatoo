@@ -618,7 +618,7 @@ func discordIRCFormat(s *discordgo.Session, guildID string, m string) string {
 			if entering {
 				if user, err := s.State.Member(guildID, n.ID); err == nil {
 					sb.WriteString("@")
-					sb.WriteString(user.Nick)
+					sb.WriteString(user.User.Username)
 				} else {
 					sb.WriteString("@invalid-user")
 				}
