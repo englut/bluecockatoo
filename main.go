@@ -675,12 +675,6 @@ func discordMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if !ok {
 		return
 	}
-	// Member seems to be nil for webhook messages.
-	// Considering that this is how PK resends messages,
-	// we should discard them.
-	if m.Member == nil {
-		return
-	}
 	replyID := ""
 	if m.MessageReference != nil {
 		if ids := idDiscordIRC[m.MessageReference.MessageID]; len(ids) > 0 {
@@ -701,7 +695,10 @@ func discordMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 		colorCode := validColors[int(h.Sum32())%len(validColors)]
 		color = fmt.Sprintf("%c%02d", fColor, colorCode)
 	}
-	nick := m.Member.Nick
+	nick := ""
+	if m.Member != nil {
+		nick = m.Member.Nick
+	}
 	if nick == "" {
 		nick = m.Author.Username
 	}
