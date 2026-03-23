@@ -3,3 +3,5 @@ server: "IRC_HOST:IRC_TLS_PORT"
 nickname: "IRC_NICK"
 channels:
   "DISCORD_CHANNEL_ID": "#IRC_CHANNEL"
+channelWebhooks:
+  "DISCORD_CHANNEL_ID": "DISCORD_CHANNEL_WEBHOOK_URL"

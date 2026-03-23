@@ -41,6 +41,7 @@ type Config struct {
 	Name          string            `yaml:"realname"`
 	WaitForAuth   bool              `yaml:"waitForAuth,omitempty"`
 	Channels      map[string]string `yaml:"channels"`              // Discord ID to IRC name
+	ChannelWebhooks map[string]string `yaml:"channelWebhooks"` // Discord ID to webhook URL (optional)
 }
 
 var cfg Config
@@ -56,6 +57,9 @@ var discord *discordgo.Session
 
 var idIRCDiscord = make(map[string][]string)
 var idDiscordIRC = make(map[string][]string)
+
+var webhookCache = make(map[string]*discordgo.Webhook)
+var webhookCacheLock sync.Mutex
 
 func main() {
 	flag.BoolVar(&debug, "debug", false, "enable debug logging")
@@ -375,10 +379,134 @@ func discordTransform(channel, msg string) string {
 	return sb.String()
 }
 
+func getWebhook(channelID string) (*discordgo.Webhook, error) {
+	webhookCacheLock.Lock()
+	defer webhookCacheLock.Unlock()
+
+	// Check cache first
+	if wh, ok := webhookCache[channelID]; ok {
+		return wh, nil
+	}
+
+	// Check if manual webhook URL is configured
+	if webhookURL, ok := cfg.ChannelWebhooks[channelID]; ok && webhookURL != "" {
+		// Parse webhook URL to extract ID and token
+		// Format: https://discord.com/api/webhooks/{id}/{token}
+		parts := strings.Split(webhookURL, "/")
+		if len(parts) >= 2 {
+			webhookID := parts[len(parts)-2]
+			webhookToken := parts[len(parts)-1]
+			wh, err := discord.Webhook(webhookID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch configured webhook: %w", err)
+			}
+			wh.Token = webhookToken
+			webhookCache[channelID] = wh
+			return wh, nil
+		}
+	}
+
+	// Auto-create webhook
+	// Check if webhook already exists
+	webhooks, err := discord.ChannelWebhooks(channelID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list webhooks: %w", err)
+	}
+
+	for _, wh := range webhooks {
+		if wh.Name == "bluecockatoo-bridge" {
+			webhookCache[channelID] = wh
+			return wh, nil
+		}
+	}
+
+	// Create new webhook
+	wh, err := discord.WebhookCreate(channelID, "bluecockatoo-bridge", "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create webhook: %w", err)
+	}
+
+	webhookCache[channelID] = wh
+	return wh, nil
+}
+
 func discordSend(id string, channel string, msg string, replyID string) {
 	msg = discordFormat(msg)
 	msg = discordTransform(channel, msg)
 
+	// Try to use webhook for better user masquerading
+	wh, err := getWebhook(channel)
+	if debug {
+		if err != nil {
+			fmt.Printf("getWebhook error: %v\n", err)
+		} else if wh != nil {
+			fmt.Printf("Got webhook: ID=%s Name=%s\n", wh.ID, wh.Name)
+		}
+		fmt.Printf("Raw message before extraction: %q (bytes: %v)\n", msg, []byte(msg))
+	}
+	if err == nil && wh != nil {
+		// Extract username from message format after Discord markdown conversion
+		// Format: \u200b**<username>**\u200b message
+		username := ""
+		content := msg
+
+		// Look for pattern: **<username>** at the start (after potential zero-width space)
+		startIdx := strings.Index(msg, "**<")
+		if startIdx >= 0 {
+			// Find the closing >**
+			endIdx := strings.Index(msg[startIdx:], ">**")
+			if endIdx > 0 {
+				// Extract username between **< and >**
+				username = msg[startIdx+3 : startIdx+endIdx]
+				
+				// Content is after >** and any zero-width spaces/spaces
+				contentStart := startIdx + endIdx + 3
+				// Skip zero-width space (3 bytes: 226 128 139) and regular space
+				if contentStart+3 < len(msg) && msg[contentStart] == 226 && msg[contentStart+1] == 128 && msg[contentStart+2] == 139 {
+					contentStart += 3
+				}
+				if contentStart < len(msg) && msg[contentStart] == ' ' {
+					contentStart++
+				}
+				if contentStart < len(msg) {
+					content = msg[contentStart:]
+				} else {
+					content = ""
+				}
+			}
+		}
+
+		// If we successfully extracted username, use webhook
+		if username != "" {
+			if debug {
+				fmt.Printf("Using webhook with username=%q content=%q\n", username, content)
+			}
+			params := &discordgo.WebhookParams{
+				Content:  content,
+				Username: username,
+			}
+			if replyID != "" {
+				params.AllowedMentions = &discordgo.MessageAllowedMentions{
+					RepliedUser: false,
+				}
+				// Note: Webhooks don't support message references/replies directly
+				// We'd need to handle this differently if reply support is critical
+			}
+
+			m, err := discord.WebhookExecute(wh.ID, wh.Token, true, params)
+			if err == nil && id != "" {
+				idIRCDiscord[id] = append(idIRCDiscord[id], m.ID)
+				idDiscordIRC[m.ID] = append(idIRCDiscord[m.ID], id)
+			}
+			if err == nil {
+				return
+			}
+			// If webhook fails, fall through to regular message sending
+			logErr.Printf("webhook execute failed, falling back to bot message: %v", err)
+		}
+	}
+
+	// Fallback to regular bot message sending
 	dm := &discordgo.MessageSend{
 		Content: msg,
 	}
@@ -714,6 +842,10 @@ func discordReady(s *discordgo.Session, m *discordgo.Ready) {
 
 func discordMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.ID == s.State.User.ID {
+		return
+	}
+	// Ignore messages from webhooks (to prevent echo from our own webhook messages)
+	if m.WebhookID != "" {
 		return
 	}
 	ic, ok := cfg.Channels[m.ChannelID]
