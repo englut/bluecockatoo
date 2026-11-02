@@ -450,6 +450,13 @@ func ircHandler(c *irc.Client, m *irc.Message) {
 		ircClient = c
 		ircClientLock.Unlock()
 	case "900":
+		// If bot mode is available, set it before joining channels
+		if ircHasBotMode {
+			c.WriteMessage(&irc.Message{
+				Command: "MODE",
+				Params:  []string{c.CurrentNick(), "+" + ircBotModeVal},
+			})
+		}
 		// Logged in to NickServ — now safe to join +r channels
 		for _, ic := range cfg.Channels {
 			c.WriteMessage(&irc.Message{
@@ -474,7 +481,7 @@ func ircHandler(c *irc.Client, m *irc.Message) {
 		})
 	case "NOTICE":
 		if len(m.Params) > 1 {
-			if strings.HasPrefix(m.Params[1], "You're now logged in as") {
+			if strings.HasPrefix(m.Params[1], "You're now logged in as") || strings.HasPrefix(m.Params[1], "You are now logged in as") {
 				if ircHasBotMode {
 					c.WriteMessage(&irc.Message{
 						Command: "MODE",
