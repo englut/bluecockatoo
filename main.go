@@ -53,6 +53,7 @@ var ircClient *irc.Client
 var ircReady bool
 var ircHasBotMode bool = false
 var ircBotModeVal string
+var ircJoinedChannels bool = false
 
 var discord *discordgo.Session
 
@@ -117,6 +118,7 @@ func main() {
 
 func ircLoop() error {
 	ircReady = false
+	ircJoinedChannels = false
 	tc, err := tls.Dial("tcp", cfg.Server, nil)
 	if err != nil {
 		return err
@@ -404,6 +406,16 @@ func discordSend(id string, channel string, msg string, replyID string) {
 	}
 }
 
+func ircJoinChannels(c *irc.Client) {
+	for _, ic := range cfg.Channels {
+		c.WriteMessage(&irc.Message{
+			Command: "JOIN",
+			Params:  []string{ic},
+		})
+	}
+	ircJoinedChannels = true
+}
+
 func ircHandler(c *irc.Client, m *irc.Message) {
 	if m.Name == c.CurrentNick() && m.Command != "PRIVMSG" && m.Command != "BATCH" {
 		return
@@ -429,22 +441,12 @@ func ircHandler(c *irc.Client, m *irc.Message) {
 			})
 			if !cfg.WaitForAuth {
 				// Join immediately after identify (works on Ergo, some others)
-				for _, ic := range cfg.Channels {
-					c.WriteMessage(&irc.Message{
-						Command: "JOIN",
-						Params:  []string{ic},
-					})
-				}
+				ircJoinChannels(c)
 			}
 			// If WaitForAuth is true, wait for 900 (logged in confirmation)
 		} else {
 			// No password, join immediately
-			for _, ic := range cfg.Channels {
-				c.WriteMessage(&irc.Message{
-					Command: "JOIN",
-					Params:  []string{ic},
-				})
-			}
+			ircJoinChannels(c)
 		}
 		ircClientLock.Lock()
 		ircClient = c
@@ -458,12 +460,7 @@ func ircHandler(c *irc.Client, m *irc.Message) {
 			})
 		}
 		// Logged in to NickServ — now safe to join +r channels
-		for _, ic := range cfg.Channels {
-			c.WriteMessage(&irc.Message{
-				Command: "JOIN",
-				Params:  []string{ic},
-			})
-		}
+		ircJoinChannels(c)
 	case "005":
 		if len(m.Params) > 2 {
 			for _, param := range m.Params[1 : len(m.Params)-1] {
@@ -481,12 +478,16 @@ func ircHandler(c *irc.Client, m *irc.Message) {
 		})
 	case "NOTICE":
 		if len(m.Params) > 1 {
-			if strings.HasPrefix(m.Params[1], "You're now logged in as") || strings.HasPrefix(m.Params[1], "You are now logged in as") {
+			if strings.EqualFold(m.Prefix.Name, "NickServ") && (strings.HasPrefix(m.Params[1], "You're now logged in as") || strings.HasPrefix(m.Params[1], "You are now logged in as")) {
 				if ircHasBotMode {
 					c.WriteMessage(&irc.Message{
 						Command: "MODE",
 						Params:  []string{c.CurrentNick(), "+" + ircBotModeVal},
 					})
+				}
+				// if channels haven't been joined yet, join now
+				if !ircJoinedChannels {
+					ircJoinChannels(c)
 				}
 			}
 		}
